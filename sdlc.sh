@@ -45,8 +45,15 @@ check_docker() {
 
 # Function to check if docker-compose is installed
 check_docker_compose() {
-    if ! command -v docker-compose &> /dev/null; then
-        echo -e "${RED}Error: docker-compose is not installed.${NC}"
+    # Check for Docker Compose V2 (docker compose) or V1 (docker-compose)
+    if docker compose version &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker compose"
+        return 0
+    elif command -v docker-compose &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+        return 0
+    else
+        echo -e "${RED}Error: Docker Compose is not installed.${NC}"
         echo "Install it from: https://docs.docker.com/compose/install/"
         exit 1
     fi
@@ -322,13 +329,40 @@ start_runners() {
 
     cd "$GITHUB_RUNNER_DIR"
     echo -e "${BLUE}Building and starting containers...${NC}"
-    docker-compose -p "$PROJECT_NAME" up --build -d --scale github-runner=$RUNNER_COUNT > /dev/null 2>&1
-    
+    $DOCKER_COMPOSE_CMD -p "$PROJECT_NAME" up --build -d --scale github-runner=$RUNNER_COUNT > /dev/null 2>&1
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Containers built and started successfully!${NC}"
         echo ""
         echo -e "${BLUE}Active runners:${NC}"
-        docker-compose -p "$PROJECT_NAME" ps --filter "status=running" --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
+        $DOCKER_COMPOSE_CMD -p "$PROJECT_NAME" ps --filter "status=running" --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
+        echo ""
+
+        # Load sdlc-claude image into DinD
+        echo -e "${BLUE}Loading sdlc-claude image into DinD...${NC}"
+
+        # Wait for DinD to be ready
+        DIND_CONTAINER="${PROJECT_NAME}-dind-1"
+        for i in {1..30}; do
+            if docker exec "$DIND_CONTAINER" docker info >/dev/null 2>&1; then
+                break
+            fi
+            if [ $i -eq 30 ]; then
+                echo -e "${YELLOW}⚠ Warning: DinD not ready, image loading may fail${NC}"
+            fi
+            sleep 1
+        done
+
+        # Export from host and import to DinD via stdin/stdout
+        docker save sdlc-claude:latest | docker exec -i "$DIND_CONTAINER" docker load > /dev/null 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}✓ sdlc-claude image loaded into DinD${NC}"
+        else
+            echo -e "${YELLOW}⚠ Warning: Failed to load image into DinD${NC}"
+            echo "   Workflows may fail. Try restarting: ./sdlc.sh --stop && ./sdlc.sh"
+        fi
+
         echo ""
         echo -e "${GREEN}✓ Runners started successfully!${NC}"
         echo ""
@@ -336,10 +370,10 @@ start_runners() {
         echo -e "  ${BLUE}./sdlc.sh --stop${NC}"
         echo ""
         echo "To check status:"
-        echo -e "  ${BLUE}cd $GITHUB_RUNNER_DIR && docker-compose -p $PROJECT_NAME ps${NC}"
+        echo -e "  ${BLUE}cd $GITHUB_RUNNER_DIR && $DOCKER_COMPOSE_CMD -p $PROJECT_NAME ps${NC}"
         echo ""
         echo "To view logs:"
-        echo -e "  ${BLUE}cd $GITHUB_RUNNER_DIR && docker-compose -p $PROJECT_NAME logs -f${NC}"
+        echo -e "  ${BLUE}cd $GITHUB_RUNNER_DIR && $DOCKER_COMPOSE_CMD -p $PROJECT_NAME logs -f${NC}"
         echo ""
     else
         echo -e "${RED}✗ Failed to start runners${NC}"
@@ -358,7 +392,7 @@ stop_runners() {
     echo ""
 
     cd "$GITHUB_RUNNER_DIR"
-    docker-compose -p "$PROJECT_NAME" down
+    $DOCKER_COMPOSE_CMD -p "$PROJECT_NAME" down
 
     if [ $? -eq 0 ]; then
         echo ""

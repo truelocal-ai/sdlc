@@ -6,7 +6,9 @@ ARG RUNNER_VERSION="2.329.0"
 # Environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RUNNER_ALLOW_RUNASROOT=0
-ENV DOCKER_HOST=unix:///var/run/docker.sock
+ENV DOCKER_HOST=tcp://docker:2376
+ENV DOCKER_TLS_VERIFY=1
+ENV DOCKER_CERT_PATH=/certs/client
 ENV RUNNER_WORKDIR=_work
 ENV RUNNER_LABELS=self-hosted,linux,docker
 

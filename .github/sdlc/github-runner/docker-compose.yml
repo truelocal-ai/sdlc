@@ -1,4 +1,21 @@
 services:
+  dind:
+    image: docker:27-dind
+    privileged: true
+    restart: unless-stopped
+    hostname: docker
+    environment:
+      - DOCKER_TLS_CERTDIR=/certs
+    volumes:
+      - docker-certs:/certs/client
+      - dind-storage:/var/lib/docker
+    command:
+      - --storage-driver=overlay2
+    networks:
+      runner-network:
+        aliases:
+          - docker
+
   github-runner:
     build:
       context: .
@@ -6,12 +23,27 @@ services:
       args:
         RUNNER_VERSION: "2.329.0"
     restart: unless-stopped
+    depends_on:
+      - dind
     environment:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPOSITORY=${GITHUB_REPOSITORY}
       - RUNNER_SCOPE=${RUNNER_SCOPE:-repo}
       - RUNNER_PREFIX=${RUNNER_PREFIX:-}
+      - DOCKER_HOST=tcp://docker:2376
+      - DOCKER_TLS_VERIFY=1
+      - DOCKER_CERT_PATH=/certs/client
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - docker-certs:/certs/client:ro
     deploy:
       replicas: 5
+    networks:
+      - runner-network
+
+volumes:
+  docker-certs:
+  dind-storage:
+
+networks:
+  runner-network:
+    driver: bridge

@@ -1,6 +1,21 @@
 #!/bin/bash
 set -e
 
+# Wait for Docker daemon to be ready (DinD)
+echo "Waiting for Docker daemon to be ready..."
+for i in {1..30}; do
+    if docker info >/dev/null 2>&1; then
+        echo "Docker daemon is ready!"
+        break
+    fi
+    if [ $i -eq 30 ]; then
+        echo "Error: Docker daemon did not become ready in time"
+        exit 1
+    fi
+    echo "Waiting for Docker daemon... (attempt $i/30)"
+    sleep 2
+done
+
 # Check required environment variables
 if [ -z "$GITHUB_TOKEN" ]; then
     echo "Error: GITHUB_TOKEN environment variable is required"
@@ -12,23 +27,15 @@ if [ -z "$GITHUB_REPOSITORY" ]; then
     exit 1
 fi
 
-# Extract replica number from container name
+# Extract unique identifier from container ID (last 6 characters)
 CONTAINER_ID=$(hostname)
-CONTAINER_NAME=$(docker inspect --format='{{.Name}}' "$CONTAINER_ID" 2>/dev/null | sed 's/^\///')
+UNIQUE_ID=$(echo "$CONTAINER_ID" | tail -c 7 | head -c 6)  # Get last 6 chars
 
-if [ -n "$CONTAINER_NAME" ]; then
-    # Extract the number at the end of the container name (e.g., runner-github-runner-1 -> 1)
-    REPLICA_NUM=$(echo "$CONTAINER_NAME" | grep -oP '\d+$' || echo "1")
-else
-    # Fallback: use last 2 digits of container ID
-    REPLICA_NUM=$(echo "$CONTAINER_ID" | tail -c 3)
-fi
-
-# Build runner name: {prefix}-gh-runner-{replica} or gh-runner-{replica} if prefix is empty
+# Build runner name: {prefix}-gh-runner-{unique-id} or gh-runner-{unique-id} if prefix is empty
 if [ -z "$RUNNER_PREFIX" ]; then
-    RUNNER_NAME="gh-runner-${REPLICA_NUM}"
+    RUNNER_NAME="gh-runner-${UNIQUE_ID}"
 else
-    RUNNER_NAME="${RUNNER_PREFIX}-gh-runner-${REPLICA_NUM}"
+    RUNNER_NAME="${RUNNER_PREFIX}-gh-runner-${UNIQUE_ID}"
 fi
 
 if [ -z "$RUNNER_WORKDIR" ]; then
@@ -81,6 +88,13 @@ if [ -z "$REGISTRATION_TOKEN" ] || [ "$REGISTRATION_TOKEN" = "null" ]; then
         echo "  - For repository runners: 'repo' scope with admin access"
     fi
     exit 1
+fi
+
+# Remove any existing runner configuration (in case of container restart)
+if [ -f ".runner" ]; then
+    echo "Existing runner configuration found, removing..."
+    ./config.sh remove --token "${REGISTRATION_TOKEN}" 2>/dev/null || true
+    rm -f .runner .credentials .credentials_rsaparams
 fi
 
 # Configure the runner

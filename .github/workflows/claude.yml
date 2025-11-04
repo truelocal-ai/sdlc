@@ -189,7 +189,29 @@ jobs:
 
           User request: ${{ steps.context.outputs.BODY }}"
 
+          # Note: This workflow runs via DinD (Docker-in-Docker)
+          # The certs are already available at /certs/client in the DinD container's filesystem
+          # We use bind mounts instead of volume mounts since DinD has its own volume namespace
+
+          # Get the DinD container's IP from the host perspective
+          # The github-runner can resolve "docker" via the runner-network alias
+          DIND_IP=$(getent hosts docker | awk '{ print $1 }')
+
+          if [ -z "$DIND_IP" ]; then
+            echo "❌ Error: Could not resolve DinD container IP"
+            exit 1
+          fi
+
+          echo "DinD IP: $DIND_IP"
+          echo "Running sdlc-claude container via DinD..."
+
           docker run --rm \
+            --network bridge \
+            --add-host=docker:$DIND_IP \
+            -e DOCKER_HOST=tcp://docker:2376 \
+            -e DOCKER_TLS_VERIFY=1 \
+            -e DOCKER_CERT_PATH=/certs/client \
+            -v /certs/client:/certs/client:ro \
             -e CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" \
             -e GITHUB_TOKEN="$TOKEN" \
             -e GITHUB_REPOSITORY="${{ github.repository }}" \
@@ -199,5 +221,4 @@ jobs:
             -e GITHUB_ACTOR="${{ steps.context.outputs.ACTOR }}" \
             -e ISSUE_TYPE="${{ steps.context.outputs.TYPE }}" \
             -e ISSUE_NUMBER="${{ steps.context.outputs.NUMBER }}" \
-            -v /var/run/docker.sock:/var/run/docker.sock \
             sdlc-claude:latest
