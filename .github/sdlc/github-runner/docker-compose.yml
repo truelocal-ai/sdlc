@@ -33,6 +33,10 @@ services:
       - DOCKER_HOST=tcp://docker:2376
       - DOCKER_TLS_VERIFY=1
       - DOCKER_CERT_PATH=/certs/client
+      - USE_GLM=${USE_GLM:-false}
+      - ZAI_API_KEY=${ZAI_API_KEY:-}
+      - USE_ROUTER=${USE_ROUTER:-false}
+      - ROUTER_CONFIG=${ROUTER_CONFIG:-}
     volumes:
       - docker-certs:/certs/client:ro
     deploy:
