@@ -129,7 +129,9 @@ To change your configuration:
 
 ## Configuration
 
-The `.env` file in `.github/sdlc/github-runner/` contains:
+### Basic Runner Configuration
+
+The `.env` file in `.github/sdlc/github-runner/` contains basic runner settings:
 
 ```env
 # Your GitHub Personal Access Token
@@ -146,58 +148,259 @@ RUNNER_PREFIX=my-hostname
 
 # Number of parallel runners
 RUNNER_REPLICATIONS=5
-
-# GLM 4.6 Support (Experimental)
-USE_GLM=false
-ZAI_API_KEY=
 ```
 
-## GLM 4.6 Support (Experimental)
+### Advanced Configuration (Router)
 
-SDLC now supports using Z.AI's GLM 4.6 models as an experimental alternative to Anthropic's Claude models. This feature allows you to:
+Advanced configuration is now managed via a **single GitHub Secret** called `SDLC_RUNNER_CONFIG`. This JSON-based configuration allows you to:
 
-- Use GLM-4.6 for high-quality code generation (replaces both Sonnet and Opus; both are mapped to the same GLM-4.6 model variant)
-- Use GLM-4.5-Air for faster responses (replaces Haiku)
-- Connect to Z.AI's API endpoint as a drop-in replacement
+- Configure router settings centrally (GLM, Ollama, OpenRouter, etc. are all configured via router)
+- Set **runner-specific configurations** (different configs for different runners)
+- Control everything from GitHub without modifying local files
 
-### Setting Up GLM 4.6
+#### Setting Up SDLC_RUNNER_CONFIG
 
-1. **Get a Z.AI API Key**:
-   - Visit [Z.AI Open Platform](https://z.ai/model-api)
-   - Register or login to your account
-   - Create an API key in the [API Keys management page](https://z.ai/manage-apikey/apikey-list)
-   - Copy your API key for use in setup
+1. Go to your repository: **Settings → Secrets and variables → Actions**
+2. Click **New repository secret**
+3. Name: `SDLC_RUNNER_CONFIG`
+4. Value: JSON configuration (see example below)
 
-2. **Configure During Setup**:
-   When running `./sdlc.sh --setup`, answer "yes" when prompted about GLM 4.6 support and provide your Z.AI API key.
+#### Configuration Format
 
-3. **Manual Configuration**:
-   Alternatively, edit `.github/sdlc/github-runner/.env` and set:
-   ```env
-   USE_GLM=true
-   ZAI_API_KEY=your_zai_api_key_here
-   ```
+```json
+{
+  "default": {
+    "router": {
+      "enabled": false,
+      "config": {}
+    }
+  },
+  "runners": {
+    "my-hostname-gh-runner-*": {
+      "router": {
+        "enabled": true,
+        "config": {
+          "Providers": [
+            {
+              "name": "openrouter",
+              "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+              "api_key": "your-api-key",
+              "models": ["anthropic/claude-3.5-sonnet"]
+            }
+          ],
+          "Router": {
+            "default": "openrouter,anthropic/claude-3.5-sonnet"
+          }
+        }
+      }
+    }
+  }
+}
+```
 
-4. **GitHub Secrets**:
-   - When using GLM, you still need to set `CLAUDE_CODE_OAUTH_TOKEN` in GitHub Secrets
-   - The system will use the Z.AI API key for model access instead
+#### Runner-Specific Configuration
 
-### Model Mapping
+The `runners` object allows you to configure different settings per runner. Runner names are matched using patterns:
 
-When GLM support is enabled, Claude Code's model selection maps to:
+- **Exact match**: `"my-runner-abc123"` matches exactly that runner
+- **Wildcard pattern**: `"my-hostname-gh-runner-*"` matches all runners starting with that prefix
 
-| Claude Code Model | GLM Model      | Use Case               |
-|-------------------|----------------|------------------------|
-| Opus              | GLM-4.6        | Complex tasks          |
-| Sonnet            | GLM-4.6        | Balanced performance   |
-| Haiku             | GLM-4.5-Air    | Fast responses         |
+When a job runs, the workflow:
+1. Identifies which runner is executing (via `runner.name`)
+2. Checks for matching patterns in the `runners` object
+3. Merges runner-specific config with defaults
+4. Applies the configuration to the Claude Code container
 
-### Important Notes
+**Example Scenario:**
+- Your runners (`my-hostname-gh-runner-*`) use OpenRouter with custom models
+- Your partner's runners (`partner-hostname-gh-runner-*`) use GLM 4.6 via router
+- Default runners use standard Claude
 
-- This is an **experimental feature** - behavior may differ from standard Claude
-- API timeout is set to 3000 seconds (50 minutes) for long-running tasks
-- The Z.AI endpoint (`https://api.z.ai/api/anthropic`) provides Anthropic-compatible API
-- You can switch back to standard Claude by setting `USE_GLM=false` in the `.env` file
+Each runner automatically gets the correct configuration when it picks up a job!
+
+See `.github/sdlc/config-example.json` for a complete example.
+
+### Model Override in Prompts
+
+You can override the model selection per-request by using `@override=` in your prompt. This allows you to specify which provider/model to use for a specific task.
+
+**Format:**
+- `@override=provider` - Uses the first model from the specified provider
+- `@override=provider,model` - Uses the specific model from the provider
+
+**Examples:**
+```
+@claude @override=ollama add unit tests for the authentication module
+@claude @override=zai,glm-4.6 review this pull request
+@claude @override=openrouter,anthropic/claude-3.5-sonnet refactor this code
+```
+
+**How it works:**
+1. You include `@override=provider` or `@override=provider,model` in your request
+2. The workflow validates that the runner has that provider/model configured
+3. If available, it overrides the default router configuration for that request
+4. If not available, it falls back to the runner's default configuration
+
+**Notes:**
+- The override is validated against the runner's router configuration
+- If the runner doesn't have the requested provider/model, it will use the default
+- The override only applies to that specific request
+- Works with any configured provider (Ollama, GLM, OpenRouter, etc.)
+
+## Router Configuration Examples
+
+The router supports multiple providers. Here are common configuration examples:
+
+### Example 1: Using GLM 4.6 (Z.AI)
+
+```json
+{
+  "runners": {
+    "my-runner-*": {
+      "router": {
+        "enabled": true,
+        "config": {
+          "Providers": [
+            {
+              "name": "zai",
+              "api_base_url": "https://api.z.ai/api/anthropic",
+              "api_key": "your-zai-api-key",
+              "models": ["glm-4.6", "glm-4.5-air"]
+            }
+          ],
+          "Router": {
+            "default": "zai,glm-4.6",
+            "background": "zai,glm-4.5-air"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**Getting a Z.AI API Key:**
+1. Visit [Z.AI Open Platform](https://z.ai/model-api)
+2. Register or login to your account
+3. Create an API key in the [API Keys management page](https://z.ai/manage-apikey/apikey-list)
+
+### Example 2: Using Ollama (Local)
+
+For local development with Ollama running on the host:
+
+```json
+{
+  "runners": {
+    "local-dev-gh-runner-*": {
+      "router": {
+        "enabled": true,
+        "config": {
+          "Providers": [
+            {
+              "name": "ollama",
+              "api_base_url": "http://host.docker.internal:11434/v1/chat/completions",
+              "api_key": "",
+              "models": ["llama3.1", "qwen2.5", "deepseek-r1"]
+            }
+          ],
+          "Router": {
+            "default": "ollama,llama3.1",
+            "background": "ollama,qwen2.5",
+            "think": "ollama,deepseek-r1"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**Note:** Ensure Ollama is running on the host and accessible from the Docker container.
+
+### Example 3: Using OpenRouter
+
+```json
+{
+  "runners": {
+    "my-runner-*": {
+      "router": {
+        "enabled": true,
+        "config": {
+          "Providers": [
+            {
+              "name": "openrouter",
+              "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+              "api_key": "your-openrouter-api-key",
+              "models": [
+                "anthropic/claude-3.5-sonnet",
+                "google/gemini-2.5-pro-preview",
+                "deepseek/deepseek-chat"
+              ]
+            }
+          ],
+          "Router": {
+            "default": "openrouter,anthropic/claude-3.5-sonnet",
+            "background": "openrouter,deepseek/deepseek-chat",
+            "longContext": "openrouter,google/gemini-2.5-pro-preview"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Example 4: Using Multiple Providers
+
+Route different tasks to different providers:
+
+```json
+{
+  "runners": {
+    "my-runner-*": {
+      "router": {
+        "enabled": true,
+        "config": {
+          "Providers": [
+            {
+              "name": "openrouter",
+              "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+              "api_key": "your-openrouter-key",
+              "models": ["anthropic/claude-3.5-sonnet"]
+            },
+            {
+              "name": "deepseek",
+              "api_base_url": "https://api.deepseek.com/chat/completions",
+              "api_key": "your-deepseek-key",
+              "models": ["deepseek-chat", "deepseek-reasoner"]
+            }
+          ],
+          "Router": {
+            "default": "openrouter,anthropic/claude-3.5-sonnet",
+            "background": "deepseek,deepseek-chat",
+            "think": "deepseek,deepseek-reasoner"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Router Features
+
+- **Multiple Providers**: Configure OpenRouter, DeepSeek, Ollama, Gemini, Volcengine, SiliconFlow, Z.AI (GLM), and more
+- **Intelligent Routing**: Route different task types to different models
+- **Runner-Specific**: Different runners can use different router configurations
+- **Dynamic Switching**: Switch models on-the-fly using `/model provider,model_name` commands
+
+### Example Use Cases
+
+- **Cost Optimization**: Route simple tasks to cheaper models, complex tasks to premium models
+- **Performance Tuning**: Use fast models for background tasks, powerful models for critical work
+- **Multi-Provider**: Leverage different providers' strengths for different scenarios
+- **Model Testing**: Easily test and compare different models and providers
+- **Local Development**: Use Ollama for local testing without API costs
 
 ## Project Structure
 

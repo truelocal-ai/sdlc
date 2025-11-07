@@ -110,53 +110,68 @@ fi
 echo "Repository cloned to: $WORKSPACE_DIR"
 echo ""
 
-# Configure GLM if enabled
-if [ "${USE_GLM:-false}" = "true" ]; then
-    echo "=== Configuring GLM 4.6 Support ==="
-    if [ -z "$ZAI_API_KEY" ]; then
-        echo "ERROR: USE_GLM is true but ZAI_API_KEY is not set"
-        exit 1
-    fi
+# Configure Claude Code Router if enabled
+USE_ROUTER="${USE_ROUTER:-false}"
+MODEL_OVERRIDE="${MODEL_OVERRIDE:-}"
+ROUTER_CONFIG_DIR="/home/claude/.claude-code-router"
+ROUTER_CONFIG_FILE="$ROUTER_CONFIG_DIR/config.json"
+CLAUDE_CMD="claude"
 
-    echo "Configuring Claude Code to use Z.AI's GLM models..."
-
-    # Create or update ~/.claude/settings.json with GLM configuration using jq for safe JSON generation
-    mkdir -p /home/claude/.claude
-
-    # Use jq to safely generate the JSON with the API key
-    # API_TIMEOUT_MS is set to 3000000 (50 minutes) for long-running coding tasks
-    jq -n \
-        --arg api_key "$ZAI_API_KEY" \
-        '{
-            "env": {
-                "ANTHROPIC_AUTH_TOKEN": $api_key,
-                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-                "API_TIMEOUT_MS": "3000000",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
-                "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-4.6",
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-4.6"
+if [ "$USE_ROUTER" = "true" ]; then
+    echo "=== Configuring Claude Code Router ==="
+    
+    # Create router config directory
+    mkdir -p "$ROUTER_CONFIG_DIR"
+    
+    # Write router configuration
+    if [ -n "$ROUTER_CONFIG" ]; then
+        echo "Using provided router configuration from ROUTER_CONFIG environment variable"
+        echo "$ROUTER_CONFIG" > "$ROUTER_CONFIG_FILE"
+        
+        # Apply model override if specified
+        if [ -n "$MODEL_OVERRIDE" ]; then
+            echo "Applying model override: $MODEL_OVERRIDE"
+            # Update the Router.default field with the override
+            jq --arg override "$MODEL_OVERRIDE" '.Router.default = $override' "$ROUTER_CONFIG_FILE" > "$ROUTER_CONFIG_FILE.tmp" && mv "$ROUTER_CONFIG_FILE.tmp" "$ROUTER_CONFIG_FILE"
+            echo "✓ Router default model set to: $MODEL_OVERRIDE"
+        fi
+    else
+        echo "WARNING: USE_ROUTER is true but ROUTER_CONFIG is not set"
+        echo "Creating default router configuration. Please configure providers and models."
+        # Create a minimal default config
+        jq -n '{
+            "Providers": [],
+            "Router": {
+                "default": "anthropic,claude-3.5-sonnet"
             }
-        }' > /home/claude/.claude/settings.json
-
-    # Validate that the settings file was created successfully
-    if [ ! -s /home/claude/.claude/settings.json ]; then
-        echo "ERROR: Failed to create Claude settings file"
+        }' > "$ROUTER_CONFIG_FILE"
+    fi
+    
+    # Validate router config file
+    if [ ! -s "$ROUTER_CONFIG_FILE" ]; then
+        echo "ERROR: Failed to create router configuration file"
         exit 1
     fi
-
-    # Verify the API key was properly set (without exposing it)
-    if ! jq -e '.env.ANTHROPIC_AUTH_TOKEN' /home/claude/.claude/settings.json > /dev/null; then
-        echo "ERROR: API key was not properly set in settings file"
+    
+    # Validate JSON syntax
+    if ! jq empty "$ROUTER_CONFIG_FILE" 2>/dev/null; then
+        echo "ERROR: Invalid JSON in router configuration"
         exit 1
     fi
-
-    echo "GLM 4.6 configuration complete"
-    echo "  - Using Z.AI endpoint: https://api.z.ai/api/anthropic"
-    echo "  - Model mapping: Sonnet/Opus -> GLM-4.6, Haiku -> GLM-4.5-Air"
+    
+    # Use ccr (claude-code-router) command instead of claude
+    CLAUDE_CMD="ccr code"
+    
+    echo "Claude Code Router configuration complete"
+    echo "  - Config file: $ROUTER_CONFIG_FILE"
+    echo "  - Using command: $CLAUDE_CMD"
+    if [ -n "$MODEL_OVERRIDE" ]; then
+        echo "  - Model override: $MODEL_OVERRIDE"
+    fi
     echo ""
 else
-    echo "=== Using Standard Claude Code (Anthropic) ==="
-    echo "GLM support is disabled. Using CLAUDE_CODE_OAUTH_TOKEN for authentication."
+    echo "=== Router Support Disabled ==="
+    echo "Using standard Claude Code CLI directly (Anthropic)."
     echo ""
 fi
 
@@ -208,7 +223,15 @@ echo "Working directory: $(pwd)"
 echo ""
 
 # Build claude command
-CLAUDE_ARGS=(claude --continue --print --dangerously-skip-permissions)
+# Note: If router is enabled, CLAUDE_CMD is already set to "ccr code"
+# The router command doesn't support all flags, so we adjust accordingly
+if [ "$USE_ROUTER" = "true" ]; then
+    # ccr code doesn't support --dangerously-skip-permissions flag
+    # Split the command into array: "ccr code" becomes ["ccr", "code"]
+    CLAUDE_ARGS=(ccr code --continue --print)
+else
+    CLAUDE_ARGS=(claude --continue --print --dangerously-skip-permissions)
+fi
 
 # Add system prompt
 if [ -n "$SYSTEM_PROMPT" ]; then

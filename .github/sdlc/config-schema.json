@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SDLC Runner Configuration",
+  "description": "Configuration schema for SDLC runners with support for runner-specific configs",
+  "type": "object",
+  "properties": {
+    "default": {
+      "type": "object",
+      "description": "Default configuration applied to all runners unless overridden",
+      "properties": {
+        "router": {
+          "type": "object",
+          "description": "Claude Code Router configuration",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "config": {
+              "type": "object",
+              "description": "Router configuration JSON (same format as claude-code-router config.json). GLM, Ollama, and other providers are configured here."
+            }
+          }
+        }
+      }
+    },
+    "runners": {
+      "type": "object",
+      "description": "Runner-specific configurations keyed by runner name pattern or label",
+      "patternProperties": {
+        ".*": {
+          "type": "object",
+          "description": "Configuration for runners matching this pattern",
+          "properties": {
+            "router": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "config": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": ["default"]
+}
+

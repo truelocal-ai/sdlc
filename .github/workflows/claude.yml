@@ -104,8 +104,15 @@ jobs:
           echo "CLAUDE_NUMBER=$CLAUDE_NUMBER" >> $GITHUB_OUTPUT
           echo "CLAUDE_TYPE=$CLAUDE_TYPE" >> $GITHUB_OUTPUT
 
-          # Remove @claude mentions
-          BODY=$(echo "$BODY" | sed 's/@claude//g')
+          # Detect @override= pattern (e.g., @override=ollama or @override=zai,glm-4.6)
+          OVERRIDE=""
+          if echo "$BODY" | grep -qE "@override=[^[:space:]]+"; then
+            OVERRIDE=$(echo "$BODY" | grep -oE "@override=[^[:space:]]+" | head -1 | sed 's/@override=//')
+            echo "Detected override: $OVERRIDE"
+          fi
+
+          # Remove @claude mentions and @override patterns from body
+          BODY=$(echo "$BODY" | sed 's/@claude//g' | sed 's/@override=[^[:space:]]*//g')
 
           # Multi-line output
           {
@@ -113,6 +120,11 @@ jobs:
             echo "$BODY"
             echo "EOF"
           } >> $GITHUB_OUTPUT
+          
+          # Output override if detected
+          if [ -n "$OVERRIDE" ]; then
+            echo "OVERRIDE=$OVERRIDE" >> $GITHUB_OUTPUT
+          fi
 
       - name: Check User Permissions
         id: permission_check
@@ -158,6 +170,145 @@ jobs:
             else
               gh pr comment "$NUMBER" --body "$COMMENT_BODY"
             fi
+          fi
+
+      - name: Load Runner Configuration
+        id: config
+        run: |
+          # Load SDLC runner configuration from GitHub secret
+          # Format: JSON with "default" and "runners" keys
+          # Example:
+          # {
+          #   "default": {
+          #     "router": { "enabled": false, "config": {} }
+          #   },
+          #   "runners": {
+          #     "my-runner-*": {
+          #       "router": { "enabled": true, "config": {...} }
+          #     }
+          #   }
+          # }
+          
+          RUNNER_NAME="${{ runner.name }}"
+          CONFIG_JSON="${{ secrets.SDLC_RUNNER_CONFIG }}"
+          
+          # If no config provided, use defaults
+          if [ -z "$CONFIG_JSON" ]; then
+            echo "No SDLC_RUNNER_CONFIG found, using defaults"
+            echo "router_enabled=false" >> $GITHUB_OUTPUT
+            echo "router_config=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Validate JSON
+          if ! echo "$CONFIG_JSON" | jq empty 2>/dev/null; then
+            echo "❌ Error: SDLC_RUNNER_CONFIG is not valid JSON"
+            exit 1
+          fi
+          
+          # Extract default config
+          DEFAULT_ROUTER_ENABLED=$(echo "$CONFIG_JSON" | jq -r '.default.router.enabled // false')
+          DEFAULT_ROUTER_CONFIG=$(echo "$CONFIG_JSON" | jq -c '.default.router.config // {}')
+          
+          # Initialize with defaults
+          ROUTER_ENABLED="$DEFAULT_ROUTER_ENABLED"
+          ROUTER_CONFIG="$DEFAULT_ROUTER_CONFIG"
+          MODEL_OVERRIDE=""
+          
+          # Check for @override in user prompt
+          OVERRIDE="${{ steps.context.outputs.OVERRIDE }}"
+          if [ -n "$OVERRIDE" ]; then
+            echo "Checking override request: $OVERRIDE"
+            
+            # Parse override (format: "provider" or "provider,model")
+            if echo "$OVERRIDE" | grep -q ","; then
+              OVERRIDE_PROVIDER=$(echo "$OVERRIDE" | cut -d',' -f1)
+              OVERRIDE_MODEL=$(echo "$OVERRIDE" | cut -d',' -f2)
+            else
+              OVERRIDE_PROVIDER="$OVERRIDE"
+              OVERRIDE_MODEL=""
+            fi
+            
+            # Check if router is enabled
+            if [ "$ROUTER_ENABLED" = "true" ] && [ -n "$ROUTER_CONFIG" ]; then
+              # Check if provider exists in router config
+              PROVIDER_EXISTS=$(echo "$ROUTER_CONFIG" | jq -e ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\")" > /dev/null 2>&1 && echo "true" || echo "false")
+              
+              if [ "$PROVIDER_EXISTS" = "true" ]; then
+                if [ -n "$OVERRIDE_MODEL" ]; then
+                  # Check if specific model exists
+                  MODEL_EXISTS=$(echo "$ROUTER_CONFIG" | jq -e ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\") | .models[] | select(. == \"$OVERRIDE_MODEL\")" > /dev/null 2>&1 && echo "true" || echo "false")
+                  
+                  if [ "$MODEL_EXISTS" = "true" ]; then
+                    MODEL_OVERRIDE="$OVERRIDE"
+                    echo "✓ Override validated: $MODEL_OVERRIDE is available"
+                  else
+                    echo "⚠️ Model $OVERRIDE_MODEL not found in provider $OVERRIDE_PROVIDER"
+                    echo "  Available models:"
+                    echo "$ROUTER_CONFIG" | jq -r ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\") | .models[]" | sed 's/^/    - /'
+                    echo "  Falling back to default router configuration"
+                  fi
+                else
+                  # Provider only - use first model from that provider
+                  FIRST_MODEL=$(echo "$ROUTER_CONFIG" | jq -r ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\") | .models[0]")
+                  if [ -n "$FIRST_MODEL" ] && [ "$FIRST_MODEL" != "null" ]; then
+                    MODEL_OVERRIDE="$OVERRIDE_PROVIDER,$FIRST_MODEL"
+                    echo "✓ Override validated: using $MODEL_OVERRIDE (first model from provider)"
+                  else
+                    echo "⚠️ No models found for provider $OVERRIDE_PROVIDER"
+                    echo "  Falling back to default router configuration"
+                  fi
+                fi
+              else
+                echo "⚠️ Provider $OVERRIDE_PROVIDER not configured for this runner"
+                echo "  Available providers:"
+                echo "$ROUTER_CONFIG" | jq -r ".Providers[].name" | sed 's/^/    - /'
+                echo "  Falling back to default router configuration"
+              fi
+            else
+              echo "⚠️ Router not enabled for this runner"
+              echo "  Cannot use override $OVERRIDE, falling back to standard Claude"
+            fi
+          fi
+          
+          # Check for runner-specific config
+          if echo "$CONFIG_JSON" | jq -e '.runners' > /dev/null 2>&1; then
+            echo "Checking for runner-specific config for: $RUNNER_NAME"
+            
+            # Check each runner pattern
+            for pattern in $(echo "$CONFIG_JSON" | jq -r '.runners | keys[]'); do
+              # Convert wildcard pattern to regex: * -> .*
+              PATTERN_REGEX=$(echo "$pattern" | sed 's/\*/\.\*/g')
+              
+              # Simple pattern matching (supports * wildcard)
+              if [[ "$RUNNER_NAME" == "$pattern" ]] || [[ "$RUNNER_NAME" =~ ^${PATTERN_REGEX}$ ]]; then
+                echo "✓ Found matching config for pattern: $pattern"
+                
+                # Override with runner-specific config
+                RUNNER_CONFIG=$(echo "$CONFIG_JSON" | jq -c ".runners[\"$pattern\"]")
+                
+                if echo "$RUNNER_CONFIG" | jq -e '.router' > /dev/null 2>&1; then
+                  ROUTER_ENABLED=$(echo "$RUNNER_CONFIG" | jq -r '.router.enabled // false')
+                  ROUTER_CONFIG=$(echo "$RUNNER_CONFIG" | jq -c '.router.config // {}')
+                fi
+                
+                break
+              fi
+            done
+          fi
+          
+          # Output configuration
+          echo "router_enabled=$ROUTER_ENABLED" >> $GITHUB_OUTPUT
+          echo "router_config<<EOF" >> $GITHUB_OUTPUT
+          echo "$ROUTER_CONFIG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "model_override=$MODEL_OVERRIDE" >> $GITHUB_OUTPUT
+          
+          echo "Configuration loaded:"
+          echo "  Runner: $RUNNER_NAME"
+          echo "  Router Enabled: $ROUTER_ENABLED"
+          if [ -n "$MODEL_OVERRIDE" ]; then
+            echo "  Model Override: $MODEL_OVERRIDE"
           fi
 
       - name: Run Claude Code
@@ -221,8 +372,7 @@ jobs:
             -e GITHUB_ACTOR="${{ steps.context.outputs.ACTOR }}" \
             -e ISSUE_TYPE="${{ steps.context.outputs.TYPE }}" \
             -e ISSUE_NUMBER="${{ steps.context.outputs.NUMBER }}" \
-            -e USE_GLM="${USE_GLM:-false}" \
-            -e ZAI_API_KEY="${ZAI_API_KEY:-}" \
-            -e USE_ROUTER="${USE_ROUTER:-false}" \
-            -e ROUTER_CONFIG="${ROUTER_CONFIG:-}" \
+            -e USE_ROUTER="${{ steps.config.outputs.router_enabled }}" \
+            -e ROUTER_CONFIG="${{ steps.config.outputs.router_config }}" \
+            -e MODEL_OVERRIDE="${{ steps.config.outputs.model_override }}" \
             sdlc-claude:latest

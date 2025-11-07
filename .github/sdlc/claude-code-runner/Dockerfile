@@ -57,6 +57,10 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | b
 # Install Claude Code CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
+# Install claude-code-router
+RUN . "$NVM_DIR/nvm.sh" && \
+    npm install -g @musistudio/claude-code-router
+
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 WORKDIR /workspace

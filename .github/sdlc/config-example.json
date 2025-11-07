@@ -1,0 +1,76 @@
+{
+  "default": {
+    "router": {
+      "enabled": false,
+      "config": {}
+    }
+  },
+  "runners": {
+    "my-hostname-gh-runner-*": {
+      "router": {
+        "enabled": true,
+        "config": {
+          "Providers": [
+            {
+              "name": "openrouter",
+              "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+              "api_key": "your-openrouter-api-key",
+              "models": [
+                "anthropic/claude-3.5-sonnet",
+                "google/gemini-2.5-pro-preview"
+              ]
+            }
+          ],
+          "Router": {
+            "default": "openrouter,anthropic/claude-3.5-sonnet",
+            "background": "openrouter,google/gemini-2.5-pro-preview"
+          }
+        }
+      }
+    },
+    "partner-hostname-gh-runner-*": {
+      "router": {
+        "enabled": true,
+        "config": {
+          "Providers": [
+            {
+              "name": "zai",
+              "api_base_url": "https://api.z.ai/api/anthropic",
+              "api_key": "partner-zai-api-key",
+              "models": [
+                "glm-4.6",
+                "glm-4.5-air"
+              ]
+            }
+          ],
+          "Router": {
+            "default": "zai,glm-4.6",
+            "background": "zai,glm-4.5-air"
+          }
+        }
+      }
+    },
+    "local-dev-gh-runner-*": {
+      "router": {
+        "enabled": true,
+        "config": {
+          "Providers": [
+            {
+              "name": "ollama",
+              "api_base_url": "http://host.docker.internal:11434/v1/chat/completions",
+              "api_key": "",
+              "models": [
+                "llama3.1",
+                "qwen2.5"
+              ]
+            }
+          ],
+          "Router": {
+            "default": "ollama,llama3.1",
+            "background": "ollama,qwen2.5"
+          }
+        }
+      }
+    }
+  }
+}

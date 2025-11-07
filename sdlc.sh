@@ -244,38 +244,8 @@ run_setup() {
         done
 
         echo ""
-
-        # Prompt for GLM support (optional)
-        echo -e "${YELLOW}5. GLM 4.6 Support (Experimental)${NC}"
-        echo "   Would you like to use GLM 4.6 from Z.AI instead of Claude?"
-        echo "   This is an experimental feature that uses Z.AI's API as a drop-in replacement."
-        echo "   You'll need a Z.AI API key from: https://z.ai/model-api"
-        echo ""
-        read -p "   Enable GLM 4.6 support? (y/n, default: n): " ENABLE_GLM
-
-        USE_GLM="false"
-        ZAI_API_KEY=""
-
-        if [[ $ENABLE_GLM =~ ^[Yy]$ ]]; then
-            USE_GLM="true"
-            echo ""
-            echo -e "${BLUE}   GLM 4.6 Configuration${NC}"
-            echo "   Create an API key at: https://z.ai/manage-apikey/apikey-list"
-            echo ""
-
-            while true; do
-                read -s -p "   Enter your Z.AI API key: " ZAI_API_KEY
-                echo ""
-
-                validate_non_empty "$ZAI_API_KEY" "Z.AI API key" || continue
-                break
-            done
-
-            echo -e "${GREEN}   ✓ GLM 4.6 support enabled${NC}"
-        else
-            echo -e "${BLUE}   ✓ Using standard Claude Code (Anthropic)${NC}"
-        fi
-
+        echo -e "${BLUE}Note: GLM and Router configuration is now managed via GitHub Secrets.${NC}"
+        echo "   See README.md for details on configuring SDLC_RUNNER_CONFIG secret."
         echo ""
         echo -e "${BLUE}Creating .env file...${NC}"
 
@@ -300,11 +270,8 @@ RUNNER_PREFIX=$RUNNER_PREFIX
 # Number of runner replications (default: 5)
 RUNNER_REPLICATIONS=$RUNNER_REPLICATIONS
 
-# GLM 4.6 Support (Experimental) - Set to 'true' to use Z.AI's GLM models
-USE_GLM=$USE_GLM
-
-# Z.AI API Key (required if USE_GLM=true)
-ZAI_API_KEY=$ZAI_API_KEY
+# Note: GLM and Router configuration is now managed via GitHub Secret SDLC_RUNNER_CONFIG
+# See README.md for configuration details
 EOF
 
         echo -e "${GREEN}✓ Created .env file with your configuration${NC}"
@@ -319,9 +286,11 @@ EOF
     echo -e "${GREEN}✓ Runner configuration file created${NC}"
     echo ""
     print_section_header "Next Steps"
-    echo "1. Configure GitHub Secret (in repository settings):"
+    echo "1. Configure GitHub Secrets (in repository settings):"
     echo "   Go to: Settings → Secrets and variables → Actions"
     echo "   - CLAUDE_CODE_OAUTH_TOKEN: Your Claude Code OAuth token"
+    echo "   - SDLC_RUNNER_CONFIG: JSON configuration for runners (optional)"
+    echo "     See .github/sdlc/config-example.json for format"
     echo ""
     echo "2. Start the self-hosted GitHub Actions runners:"
     echo ""
