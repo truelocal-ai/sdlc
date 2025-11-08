@@ -124,6 +124,16 @@ if [ "$USE_ROUTER" = "true" ]; then
     mkdir -p "$ROUTER_CONFIG_DIR"
     
     # Write router configuration
+    # Decode base64-encoded ROUTER_CONFIG if provided, otherwise use ROUTER_CONFIG directly
+    if [ -n "$ROUTER_CONFIG_B64" ]; then
+        echo "Using provided router configuration from ROUTER_CONFIG_B64 (base64 encoded)"
+        ROUTER_CONFIG=$(echo "$ROUTER_CONFIG_B64" | base64 -d 2>/dev/null)
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to decode ROUTER_CONFIG_B64"
+            exit 1
+        fi
+    fi
+    
     if [ -n "$ROUTER_CONFIG" ]; then
         echo "Using provided router configuration from ROUTER_CONFIG environment variable"
         
