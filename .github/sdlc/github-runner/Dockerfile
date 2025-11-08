@@ -24,6 +24,7 @@ RUN useradd -m -s /bin/bash runner && \
     git \
     jq \
     libicu-dev \
+    unzip \
     && rm -rf /var/lib/apt/lists/* && \
     #
     # Add Docker's official GPG key
