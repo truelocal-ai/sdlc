@@ -268,7 +268,7 @@ echo ""
 # The router command doesn't support all flags, so we adjust accordingly
 if [ "$USE_ROUTER" = "true" ]; then
     # ccr code doesn't support --dangerously-skip-permissions flag
-    # ccr might not support --system-prompt as a command-line argument
+    # ccr accepts the prompt as a positional argument, not via stdin
     # We'll prepend system prompt to user prompt instead
     CLAUDE_ARGS=(ccr code --continue --print)
     
@@ -279,6 +279,9 @@ if [ "$USE_ROUTER" = "true" ]; then
 
 $USER_PROMPT"
     fi
+    
+    # Store the full prompt to pass as positional argument to ccr code
+    FULL_PROMPT="$USER_PROMPT"
 else
     CLAUDE_ARGS=(claude --continue --print --dangerously-skip-permissions)
     
@@ -315,8 +318,16 @@ set +e
 echo "Executing command: ${CLAUDE_ARGS[*]}"
 echo "User prompt length: $(echo -n "$USER_PROMPT" | wc -c) characters"
 
-# Use printf instead of echo to avoid issues with special characters
-printf '%s\n' "$USER_PROMPT" | "${CLAUDE_ARGS[@]}" 2>&1 | tee "$CLAUDE_OUTPUT_FILE"
+# For ccr, pass prompt as positional argument (ccr code doesn't read from stdin properly)
+# For standard claude, use stdin
+if [ "$USE_ROUTER" = "true" ]; then
+    # ccr code accepts the prompt as a positional argument
+    # Pass the full prompt (including system prompt if prepended) as the last argument
+    "${CLAUDE_ARGS[@]}" "$FULL_PROMPT" 2>&1 | tee "$CLAUDE_OUTPUT_FILE"
+else
+    # For standard claude, use printf for better character handling
+    printf '%s\n' "$USER_PROMPT" | "${CLAUDE_ARGS[@]}" 2>&1 | tee "$CLAUDE_OUTPUT_FILE"
+fi
 CLAUDE_EXIT_CODE=${PIPESTATUS[0]}
 set -e
 
