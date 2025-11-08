@@ -156,6 +156,10 @@ if [ "$USE_ROUTER" = "true" ]; then
             exit 1
         fi
         
+        # Automatically set NON_INTERACTIVE_MODE to true for GitHub Actions/CI environments
+        # This ensures proper behavior in automated environments
+        ROUTER_CONFIG=$(echo "$ROUTER_CONFIG" | jq '.NON_INTERACTIVE_MODE = true')
+        
         echo "$ROUTER_CONFIG" > "$ROUTER_CONFIG_FILE"
         
         # Apply model override if specified
@@ -174,8 +178,9 @@ if [ "$USE_ROUTER" = "true" ]; then
     else
         echo "WARNING: USE_ROUTER is true but ROUTER_CONFIG is not set"
         echo "Creating default router configuration. Please configure providers and models."
-        # Create a minimal default config
+        # Create a minimal default config with NON_INTERACTIVE_MODE enabled
         jq -n '{
+            "NON_INTERACTIVE_MODE": true,
             "Providers": [],
             "Router": {
                 "default": "anthropic,claude-3.5-sonnet"
@@ -263,16 +268,16 @@ echo ""
 # The router command doesn't support all flags, so we adjust accordingly
 if [ "$USE_ROUTER" = "true" ]; then
     # ccr code doesn't support --dangerously-skip-permissions flag
-    # Split the command into array: "ccr code" becomes ["ccr", "code"]
-    # Note: ccr might not support --system-prompt, so we'll pass it via stdin or env
+    # ccr might not support --system-prompt as a command-line argument
+    # We'll prepend system prompt to user prompt instead
     CLAUDE_ARGS=(ccr code --continue --print)
     
-    # For ccr, system prompt might need to be passed differently
-    # Try passing it as an environment variable or skip it if not supported
+    # For ccr, prepend system prompt to user prompt since --system-prompt
+    # may not be supported or may cause shell syntax errors with special characters
     if [ -n "$SYSTEM_PROMPT" ]; then
-        # Some versions of ccr support --system-prompt, others don't
-        # We'll try it and let it fail gracefully if not supported
-        CLAUDE_ARGS+=(--system-prompt "$SYSTEM_PROMPT")
+        USER_PROMPT="$SYSTEM_PROMPT
+
+$USER_PROMPT"
     fi
 else
     CLAUDE_ARGS=(claude --continue --print --dangerously-skip-permissions)
@@ -293,11 +298,25 @@ if [ "$USE_ROUTER" = "true" ]; then
         exit 1
     fi
     echo "✓ ccr command found: $(which ccr)"
+    
+    # Test ccr command to see if it works
+    echo "Testing ccr command..."
+    if ccr --version > /dev/null 2>&1; then
+        echo "✓ ccr --version works"
+        ccr --version
+    else
+        echo "⚠️  ccr --version failed, but continuing..."
+    fi
 fi
 
 # Run Claude with user prompt via stdin, capture output
 set +e
-echo "$USER_PROMPT" | "${CLAUDE_ARGS[@]}" 2>&1 | tee "$CLAUDE_OUTPUT_FILE"
+# Debug: show what command we're running
+echo "Executing command: ${CLAUDE_ARGS[*]}"
+echo "User prompt length: $(echo -n "$USER_PROMPT" | wc -c) characters"
+
+# Use printf instead of echo to avoid issues with special characters
+printf '%s\n' "$USER_PROMPT" | "${CLAUDE_ARGS[@]}" 2>&1 | tee "$CLAUDE_OUTPUT_FILE"
 CLAUDE_EXIT_CODE=${PIPESTATUS[0]}
 set -e
 
