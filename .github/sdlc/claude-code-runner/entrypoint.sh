@@ -3,6 +3,17 @@ set -e
 
 echo "=== Claude Code Runner Entrypoint ==="
 
+# Load nvm to ensure node/npm are available
+export NVM_DIR="/home/claude/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+
+# Ensure npm global bin directory is in PATH
+if command -v npm > /dev/null 2>&1; then
+    NPM_GLOBAL_BIN=$(npm root -g)/../bin
+    export PATH="$NPM_GLOBAL_BIN:$PATH"
+fi
+
 # Required environment variables
 : "${GITHUB_TOKEN:?Error: GITHUB_TOKEN is required}"
 : "${GITHUB_REPOSITORY:?Error: GITHUB_REPOSITORY is required}"
