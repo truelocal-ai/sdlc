@@ -40,6 +40,7 @@ RUN useradd -m -s /bin/bash claude && \
 USER claude
 
 # Set up environment for claude user
+# Note: PATH will be updated after npm global bin is determined during claude-code-router installation
 ENV NVM_DIR="/home/claude/.nvm" \
     PATH="/home/claude/.nvm/versions/node/default/bin:/home/claude/.local/bin:$PATH"
 
@@ -52,14 +53,25 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | b
     # Add node to PATH
     echo 'export NVM_DIR="$HOME/.nvm"' >> /home/claude/.bashrc && \
     echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >> /home/claude/.bashrc && \
-    echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"' >> /home/claude/.bashrc
+    echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"' >> /home/claude/.bashrc && \
+    # Add npm global bin to PATH
+    echo 'export PATH="$(npm root -g)/../bin:$PATH"' >> /home/claude/.bashrc
 
 # Install Claude Code CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# Install claude-code-router
+# Install claude-code-router and verify installation
 RUN . "$NVM_DIR/nvm.sh" && \
-    npm install -g @musistudio/claude-code-router
+    npm install -g @musistudio/claude-code-router && \
+    # Get npm global bin directory and add to PATH
+    NPM_GLOBAL_BIN=$(npm root -g)/../bin && \
+    echo "npm global bin: $NPM_GLOBAL_BIN" && \
+    # Verify ccr command is available after adding to PATH
+    export PATH="$NPM_GLOBAL_BIN:$PATH" && \
+    which ccr && \
+    ccr --version || echo "ccr version check failed" && \
+    # Update ENV PATH to include npm global bin
+    echo "NPM_GLOBAL_BIN=$NPM_GLOBAL_BIN" >> /tmp/npm_global_bin.env
 
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 

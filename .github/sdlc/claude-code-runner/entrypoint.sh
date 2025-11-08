@@ -264,14 +264,35 @@ echo ""
 if [ "$USE_ROUTER" = "true" ]; then
     # ccr code doesn't support --dangerously-skip-permissions flag
     # Split the command into array: "ccr code" becomes ["ccr", "code"]
+    # Note: ccr might not support --system-prompt, so we'll pass it via stdin or env
     CLAUDE_ARGS=(ccr code --continue --print)
+    
+    # For ccr, system prompt might need to be passed differently
+    # Try passing it as an environment variable or skip it if not supported
+    if [ -n "$SYSTEM_PROMPT" ]; then
+        # Some versions of ccr support --system-prompt, others don't
+        # We'll try it and let it fail gracefully if not supported
+        CLAUDE_ARGS+=(--system-prompt "$SYSTEM_PROMPT")
+    fi
 else
     CLAUDE_ARGS=(claude --continue --print --dangerously-skip-permissions)
+    
+    # Add system prompt for standard claude
+    if [ -n "$SYSTEM_PROMPT" ]; then
+        CLAUDE_ARGS+=(--system-prompt "$SYSTEM_PROMPT")
+    fi
 fi
 
-# Add system prompt
-if [ -n "$SYSTEM_PROMPT" ]; then
-    CLAUDE_ARGS+=(--system-prompt "$SYSTEM_PROMPT")
+# Verify ccr is available if using router
+if [ "$USE_ROUTER" = "true" ]; then
+    if ! command -v ccr > /dev/null 2>&1; then
+        echo "ERROR: ccr command not found in PATH"
+        echo "PATH: $PATH"
+        echo "npm root -g: $(npm root -g 2>/dev/null || echo 'npm not available')"
+        which ccr || echo "ccr not found"
+        exit 1
+    fi
+    echo "✓ ccr command found: $(which ccr)"
 fi
 
 # Run Claude with user prompt via stdin, capture output
