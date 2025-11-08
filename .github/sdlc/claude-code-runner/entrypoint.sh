@@ -126,13 +126,28 @@ if [ "$USE_ROUTER" = "true" ]; then
     # Write router configuration
     if [ -n "$ROUTER_CONFIG" ]; then
         echo "Using provided router configuration from ROUTER_CONFIG environment variable"
+        
+        # Validate JSON before writing to file
+        if ! echo "$ROUTER_CONFIG" | jq empty > /dev/null 2>&1; then
+            echo "ERROR: ROUTER_CONFIG is not valid JSON"
+            echo "First 200 chars of config:"
+            echo "$ROUTER_CONFIG" | head -c 200
+            exit 1
+        fi
+        
         echo "$ROUTER_CONFIG" > "$ROUTER_CONFIG_FILE"
         
         # Apply model override if specified
         if [ -n "$MODEL_OVERRIDE" ]; then
             echo "Applying model override: $MODEL_OVERRIDE"
             # Update the Router.default field with the override
-            jq --arg override "$MODEL_OVERRIDE" '.Router.default = $override' "$ROUTER_CONFIG_FILE" > "$ROUTER_CONFIG_FILE.tmp" && mv "$ROUTER_CONFIG_FILE.tmp" "$ROUTER_CONFIG_FILE"
+            if ! jq --arg override "$MODEL_OVERRIDE" '.Router.default = $override' "$ROUTER_CONFIG_FILE" > "$ROUTER_CONFIG_FILE.tmp" 2>/dev/null; then
+                echo "ERROR: Failed to apply model override to router config"
+                echo "Config file content (first 200 chars):"
+                head -c 200 "$ROUTER_CONFIG_FILE"
+                exit 1
+            fi
+            mv "$ROUTER_CONFIG_FILE.tmp" "$ROUTER_CONFIG_FILE"
             echo "✓ Router default model set to: $MODEL_OVERRIDE"
         fi
     else
