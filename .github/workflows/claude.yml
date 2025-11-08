@@ -104,15 +104,18 @@ jobs:
           echo "CLAUDE_NUMBER=$CLAUDE_NUMBER" >> $GITHUB_OUTPUT
           echo "CLAUDE_TYPE=$CLAUDE_TYPE" >> $GITHUB_OUTPUT
 
-          # Detect @override= pattern (e.g., @override=ollama or @override=zai,glm-4.6)
+          # Detect @override= pattern (case-insensitive, e.g., @override=ollama or @OverRide=zai,glm-4.6)
           OVERRIDE=""
-          if echo "$BODY" | grep -qE "@override=[^[:space:]]+"; then
-            OVERRIDE=$(echo "$BODY" | grep -oE "@override=[^[:space:]]+" | head -1 | sed 's/@override=//')
+          if echo "$BODY" | grep -qiE "@override=[^[:space:]]+"; then
+            # Extract override value (case-insensitive match)
+            # Get the match and remove everything up to and including the first "="
+            OVERRIDE_MATCH=$(echo "$BODY" | grep -oiE "@override=[^[:space:]]+" | head -1)
+            OVERRIDE=$(echo "$OVERRIDE_MATCH" | sed 's/^[^=]*=//')
             echo "Detected override: $OVERRIDE"
           fi
 
-          # Remove @claude mentions and @override patterns from body
-          BODY=$(echo "$BODY" | sed 's/@claude//g' | sed 's/@override=[^[:space:]]*//g')
+          # Remove @claude mentions and @override patterns from body (case-insensitive)
+          BODY=$(echo "$BODY" | sed -E 's/@claude//gi' | sed -E 's/@override=[^[:space:]]*//gi')
 
           # Multi-line output
           {
@@ -175,47 +178,93 @@ jobs:
       - name: Load Runner Configuration
         id: config
         run: |
-          # Load SDLC runner configuration from GitHub secret
-          # Format: JSON with "default" and "runners" keys
-          # Example:
-          # {
-          #   "default": {
-          #     "router": { "enabled": false, "config": {} }
-          #   },
-          #   "runners": {
-          #     "my-runner-*": {
-          #       "router": { "enabled": true, "config": {...} }
-          #     }
-          #   }
-          # }
-          
+          # Load SDLC runner configuration (injected directly to isolate secret storage issues)
           RUNNER_NAME="${{ runner.name }}"
-          CONFIG_JSON="${{ secrets.SDLC_RUNNER_CONFIG }}"
           
-          # If no config provided, use defaults
-          if [ -z "$CONFIG_JSON" ]; then
-            echo "No SDLC_RUNNER_CONFIG found, using defaults"
-            echo "router_enabled=false" >> $GITHUB_OUTPUT
-            echo "router_config=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          # Inline configuration - injected from .github/sdlc/runner-config.json
+          CONFIG_JSON='{
+            "default": {
+              "router": {
+                "enabled": false,
+                "config": {}
+              }
+            },
+            "runners": {
+              "utmLino*": {
+                "router": {
+                  "enabled": true,
+                  "config": {
+                    "Providers": [
+                      {
+                        "name": "ollama",
+                        "api_base_url": "http://192.168.64.1:11434/v1/chat/completions",
+                        "api_key": "",
+                        "models": [
+                          "qwen2.5-coder:7b",
+                          "gpt-oss:20b"
+                        ]
+                      }
+                    ],
+                    "Router": {
+                      "default": "ollama,qwen2.5-coder:7b",
+                      "background": "ollama,gpt-oss:20b",
+                      "think": "ollama,qwen2.5-coder:7b"
+                    }
+                  }
+                }
+              }
+            }
+          }'
           
           # Validate JSON
-          if ! echo "$CONFIG_JSON" | jq empty 2>/dev/null; then
-            echo "❌ Error: SDLC_RUNNER_CONFIG is not valid JSON"
+          if ! echo "$CONFIG_JSON" | jq empty > /dev/null 2>&1; then
+            echo "❌ Error: Inline config is not valid JSON"
             exit 1
           fi
           
-          # Extract default config
-          DEFAULT_ROUTER_ENABLED=$(echo "$CONFIG_JSON" | jq -r '.default.router.enabled // false')
-          DEFAULT_ROUTER_CONFIG=$(echo "$CONFIG_JSON" | jq -c '.default.router.config // {}')
+          # Extract default config (with error handling)
+          DEFAULT_ROUTER_ENABLED=$(echo "$CONFIG_JSON" | jq -r '.default.router.enabled // false' 2>/dev/null || echo "false")
+          DEFAULT_ROUTER_CONFIG=$(echo "$CONFIG_JSON" | jq -c '.default.router.config // {}' 2>/dev/null || echo "{}")
           
           # Initialize with defaults
           ROUTER_ENABLED="$DEFAULT_ROUTER_ENABLED"
           ROUTER_CONFIG="$DEFAULT_ROUTER_CONFIG"
+          
+          # Check for runner-specific config FIRST (before override validation)
+          if echo "$CONFIG_JSON" | jq -e '.runners' > /dev/null 2>&1; then
+            echo "Checking for runner-specific config for: $RUNNER_NAME"
+            
+            # Check each runner pattern
+            for pattern in $(echo "$CONFIG_JSON" | jq -r '.runners | keys[]' 2>/dev/null || true); do
+              # Skip if pattern is empty
+              [ -z "$pattern" ] && continue
+              
+              # Convert wildcard pattern to regex: * -> .*
+              PATTERN_REGEX=$(echo "$pattern" | sed 's/\*/\.\*/g')
+              
+              # Simple pattern matching (supports * wildcard)
+              if [[ "$RUNNER_NAME" == "$pattern" ]] || [[ "$RUNNER_NAME" =~ ^${PATTERN_REGEX}$ ]]; then
+                echo "✓ Found matching config for pattern: $pattern"
+                
+                # Override with runner-specific config
+                RUNNER_CONFIG=$(echo "$CONFIG_JSON" | jq -c ".runners[\"$pattern\"]" 2>/dev/null || echo "{}")
+                
+                if [ -n "$RUNNER_CONFIG" ] && [ "$RUNNER_CONFIG" != "{}" ] && [ "$RUNNER_CONFIG" != "null" ]; then
+                  if echo "$RUNNER_CONFIG" | jq -e '.router' > /dev/null 2>&1; then
+                    ROUTER_ENABLED=$(echo "$RUNNER_CONFIG" | jq -r '.router.enabled // false' 2>/dev/null || echo "false")
+                    ROUTER_CONFIG=$(echo "$RUNNER_CONFIG" | jq -c '.router.config // {}' 2>/dev/null || echo "{}")
+                    echo "  Router enabled: $ROUTER_ENABLED"
+                  fi
+                fi
+                
+                break
+              fi
+            done
+          fi
+          
           MODEL_OVERRIDE=""
           
-          # Check for @override in user prompt
+          # Check for @override in user prompt (after runner config is loaded)
           OVERRIDE="${{ steps.context.outputs.OVERRIDE }}"
           if [ -n "$OVERRIDE" ]; then
             echo "Checking override request: $OVERRIDE"
@@ -229,15 +278,15 @@ jobs:
               OVERRIDE_MODEL=""
             fi
             
-            # Check if router is enabled
-            if [ "$ROUTER_ENABLED" = "true" ] && [ -n "$ROUTER_CONFIG" ]; then
+            # Check if router is enabled (after runner config load)
+            if [ "$ROUTER_ENABLED" = "true" ] && [ -n "$ROUTER_CONFIG" ] && [ "$ROUTER_CONFIG" != "{}" ]; then
               # Check if provider exists in router config
-              PROVIDER_EXISTS=$(echo "$ROUTER_CONFIG" | jq -e ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\")" > /dev/null 2>&1 && echo "true" || echo "false")
+              PROVIDER_EXISTS=$(echo "$ROUTER_CONFIG" | jq -e ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\")" > /dev/null 2>&1 && echo "true" || echo "false") || PROVIDER_EXISTS="false"
               
               if [ "$PROVIDER_EXISTS" = "true" ]; then
                 if [ -n "$OVERRIDE_MODEL" ]; then
                   # Check if specific model exists
-                  MODEL_EXISTS=$(echo "$ROUTER_CONFIG" | jq -e ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\") | .models[] | select(. == \"$OVERRIDE_MODEL\")" > /dev/null 2>&1 && echo "true" || echo "false")
+                  MODEL_EXISTS=$(echo "$ROUTER_CONFIG" | jq -e ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\") | .models[] | select(. == \"$OVERRIDE_MODEL\")" > /dev/null 2>&1 && echo "true" || echo "false") || MODEL_EXISTS="false"
                   
                   if [ "$MODEL_EXISTS" = "true" ]; then
                     MODEL_OVERRIDE="$OVERRIDE"
@@ -245,12 +294,12 @@ jobs:
                   else
                     echo "⚠️ Model $OVERRIDE_MODEL not found in provider $OVERRIDE_PROVIDER"
                     echo "  Available models:"
-                    echo "$ROUTER_CONFIG" | jq -r ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\") | .models[]" | sed 's/^/    - /'
+                    echo "$ROUTER_CONFIG" | jq -r ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\") | .models[]" 2>/dev/null | sed 's/^/    - /' || echo "    (unable to list models)"
                     echo "  Falling back to default router configuration"
                   fi
                 else
                   # Provider only - use first model from that provider
-                  FIRST_MODEL=$(echo "$ROUTER_CONFIG" | jq -r ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\") | .models[0]")
+                  FIRST_MODEL=$(echo "$ROUTER_CONFIG" | jq -r ".Providers[] | select(.name == \"$OVERRIDE_PROVIDER\") | .models[0]" 2>/dev/null || echo "")
                   if [ -n "$FIRST_MODEL" ] && [ "$FIRST_MODEL" != "null" ]; then
                     MODEL_OVERRIDE="$OVERRIDE_PROVIDER,$FIRST_MODEL"
                     echo "✓ Override validated: using $MODEL_OVERRIDE (first model from provider)"
@@ -262,7 +311,7 @@ jobs:
               else
                 echo "⚠️ Provider $OVERRIDE_PROVIDER not configured for this runner"
                 echo "  Available providers:"
-                echo "$ROUTER_CONFIG" | jq -r ".Providers[].name" | sed 's/^/    - /'
+                echo "$ROUTER_CONFIG" | jq -r ".Providers[].name" 2>/dev/null | sed 's/^/    - /' || echo "    (unable to list providers)"
                 echo "  Falling back to default router configuration"
               fi
             else
@@ -271,60 +320,126 @@ jobs:
             fi
           fi
           
-          # Check for runner-specific config
-          if echo "$CONFIG_JSON" | jq -e '.runners' > /dev/null 2>&1; then
-            echo "Checking for runner-specific config for: $RUNNER_NAME"
-            
-            # Check each runner pattern
-            for pattern in $(echo "$CONFIG_JSON" | jq -r '.runners | keys[]'); do
-              # Convert wildcard pattern to regex: * -> .*
-              PATTERN_REGEX=$(echo "$pattern" | sed 's/\*/\.\*/g')
-              
-              # Simple pattern matching (supports * wildcard)
-              if [[ "$RUNNER_NAME" == "$pattern" ]] || [[ "$RUNNER_NAME" =~ ^${PATTERN_REGEX}$ ]]; then
-                echo "✓ Found matching config for pattern: $pattern"
-                
-                # Override with runner-specific config
-                RUNNER_CONFIG=$(echo "$CONFIG_JSON" | jq -c ".runners[\"$pattern\"]")
-                
-                if echo "$RUNNER_CONFIG" | jq -e '.router' > /dev/null 2>&1; then
-                  ROUTER_ENABLED=$(echo "$RUNNER_CONFIG" | jq -r '.router.enabled // false')
-                  ROUTER_CONFIG=$(echo "$RUNNER_CONFIG" | jq -c '.router.config // {}')
-                fi
-                
-                break
-              fi
-            done
-          fi
-          
           # Output configuration
           echo "router_enabled=$ROUTER_ENABLED" >> $GITHUB_OUTPUT
-          echo "router_config<<EOF" >> $GITHUB_OUTPUT
-          echo "$ROUTER_CONFIG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # Validate ROUTER_CONFIG before outputting
+          if [ -n "$ROUTER_CONFIG" ] && [ "$ROUTER_CONFIG" != "{}" ]; then
+            if ! echo "$ROUTER_CONFIG" | jq empty > /dev/null 2>&1; then
+              echo "⚠️  Warning: ROUTER_CONFIG is not valid JSON, using empty config"
+              ROUTER_CONFIG="{}"
+            fi
+          fi
+          
+          # Base64 encode ROUTER_CONFIG to preserve JSON structure when passing as env var
+          if [ -n "$ROUTER_CONFIG" ] && [ "$ROUTER_CONFIG" != "{}" ]; then
+            ROUTER_CONFIG_B64=$(echo -n "$ROUTER_CONFIG" | base64 -w 0)
+            echo "router_config_b64=$ROUTER_CONFIG_B64" >> $GITHUB_OUTPUT
+          else
+            echo "router_config_b64=" >> $GITHUB_OUTPUT
+          fi
           echo "model_override=$MODEL_OVERRIDE" >> $GITHUB_OUTPUT
           
           echo "Configuration loaded:"
           echo "  Runner: $RUNNER_NAME"
           echo "  Router Enabled: $ROUTER_ENABLED"
+          echo "  Router Config length: $(echo "$ROUTER_CONFIG" | wc -c)"
           if [ -n "$MODEL_OVERRIDE" ]; then
             echo "  Model Override: $MODEL_OVERRIDE"
           fi
 
-      - name: Run Claude Code
-        if: steps.permission_check.outputs.has_permission == 'true'
+      - name: Prepare Router Environment
+        if: steps.permission_check.outputs.has_permission == 'true' && steps.config.outputs.router_enabled == 'true'
         run: |
-          # Prefer an explicit PAT with repo + workflow scopes if provided; otherwise use the job token
-          TOKEN="${{ secrets.GH_PAT }}"
-          if [ -z "$TOKEN" ]; then
-            TOKEN="${{ github.token }}"
+          # Install bun if not available
+          if ! command -v bun > /dev/null 2>&1; then
+            curl -fsSL https://bun.sh/install | bash
+            export PATH="$HOME/.bun/bin:$PATH"
           fi
+          
+          # Create router config directory
+          mkdir -p $HOME/.claude-code-router
+          
+          # Decode router config if provided
+          if [ -n "${{ steps.config.outputs.router_config_b64 }}" ]; then
+            echo "${{ steps.config.outputs.router_config_b64 }}" | base64 -d > $HOME/.claude-code-router/config.json
+            echo "✓ Router config loaded from base64"
+          else
+            # Create default config with Ollama
+            cat > $HOME/.claude-code-router/config.json << 'EOF'
+          {
+            "NON_INTERACTIVE_MODE": true,
+            "Providers": [
+              {
+                "name": "ollama",
+                "api_base_url": "http://192.168.64.1:11434/v1/chat/completions",
+                "api_key": "",
+                "models": [
+                  "qwen2.5-coder:7b",
+                  "gpt-oss:20b"
+                ]
+              }
+            ],
+            "Router": {
+              "default": "ollama,qwen2.5-coder:7b",
+              "background": "ollama,gpt-oss:20b",
+              "think": "ollama,qwen2.5-coder:7b"
+            }
+          }
+          EOF
+            echo "✓ Default router config created"
+          fi
+          
+          # Apply model override if specified
+          if [ -n "${{ steps.config.outputs.model_override }}" ]; then
+            jq --arg override "${{ steps.config.outputs.model_override }}" '.Router.default = $override' \
+              $HOME/.claude-code-router/config.json > $HOME/.claude-code-router/config.json.tmp
+            mv $HOME/.claude-code-router/config.json.tmp $HOME/.claude-code-router/config.json
+            echo "✓ Model override applied: ${{ steps.config.outputs.model_override }}"
+          fi
+          
+          # Validate config
+          if ! jq empty $HOME/.claude-code-router/config.json 2>/dev/null; then
+            echo "❌ Error: Router config is not valid JSON"
+            exit 1
+          fi
+          
+          echo "Router config:"
+          cat $HOME/.claude-code-router/config.json | jq '.'
+        shell: bash
 
-          USER_PROMPT="You are working on ${{ steps.context.outputs.TYPE }} #${{ steps.context.outputs.NUMBER }} in repository ${{ github.repository }}."
+      - name: Start Claude Code Router
+        if: steps.permission_check.outputs.has_permission == 'true' && steps.config.outputs.router_enabled == 'true'
+        run: |
+          export PATH="$HOME/.bun/bin:$PATH"
+          nohup bunx @musistudio/claude-code-router@latest start > /tmp/ccr.log 2>&1 &
+          sleep 5
+          
+          # Wait for service to be ready
+          for i in {1..20}; do
+            if curl -s http://localhost:3456/health > /dev/null 2>&1; then
+              echo "✓ Router service started"
+              break
+            fi
+            sleep 1
+          done
+          
+          if ! curl -s http://localhost:3456/health > /dev/null 2>&1; then
+            echo "❌ Error: Router service failed to start"
+            cat /tmp/ccr.log
+            exit 1
+          fi
+        shell: bash
 
+      - name: Prepare Prompt
+        if: steps.permission_check.outputs.has_permission == 'true'
+        id: prompt
+        run: |
+          PROMPT="You are working on ${{ steps.context.outputs.TYPE }} #${{ steps.context.outputs.NUMBER }} in repository ${{ github.repository }}."
+          
           # Add PR review comment context if available
           if [ -n "${{ steps.context.outputs.COMMENT_PATH }}" ]; then
-            USER_PROMPT="$USER_PROMPT
+            PROMPT="$PROMPT
 
           This is a PR review comment on:
           - File: ${{ steps.context.outputs.COMMENT_PATH }}
@@ -335,44 +450,30 @@ jobs:
           ${{ steps.context.outputs.COMMENT_DIFF_HUNK }}
           \`\`\`"
           fi
-
-          USER_PROMPT="$USER_PROMPT
+          
+          PROMPT="$PROMPT
 
           User request: ${{ steps.context.outputs.BODY }}"
+          
+          # Output as multiline string
+          {
+            echo "prompt<<EOF"
+            printf '%s\n' "$PROMPT"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+        shell: bash
 
-          # Note: This workflow runs via DinD (Docker-in-Docker)
-          # The certs are already available at /certs/client in the DinD container's filesystem
-          # We use bind mounts instead of volume mounts since DinD has its own volume namespace
+      - name: Set Router URL
+        if: steps.permission_check.outputs.has_permission == 'true' && steps.config.outputs.router_enabled == 'true'
+        id: router_url
+        run: echo "url=http://localhost:3456" >> $GITHUB_OUTPUT
 
-          # Get the DinD container's IP from the host perspective
-          # The github-runner can resolve "docker" via the runner-network alias
-          DIND_IP=$(getent hosts docker | awk '{ print $1 }')
-
-          if [ -z "$DIND_IP" ]; then
-            echo "❌ Error: Could not resolve DinD container IP"
-            exit 1
-          fi
-
-          echo "DinD IP: $DIND_IP"
-          echo "Running sdlc-claude container via DinD..."
-
-          docker run --rm \
-            --network bridge \
-            --add-host=docker:$DIND_IP \
-            -e DOCKER_HOST=tcp://docker:2376 \
-            -e DOCKER_TLS_VERIFY=1 \
-            -e DOCKER_CERT_PATH=/certs/client \
-            -v /certs/client:/certs/client:ro \
-            -e CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" \
-            -e GITHUB_TOKEN="$TOKEN" \
-            -e GITHUB_REPOSITORY="${{ github.repository }}" \
-            -e GITHUB_REF="${{ steps.context.outputs.REF }}" \
-            -e CLAUDE_BRANCH_NAME="claude-${{ steps.context.outputs.CLAUDE_TYPE }}-${{ steps.context.outputs.CLAUDE_NUMBER }}" \
-            -e USER_PROMPT="$USER_PROMPT" \
-            -e GITHUB_ACTOR="${{ steps.context.outputs.ACTOR }}" \
-            -e ISSUE_TYPE="${{ steps.context.outputs.TYPE }}" \
-            -e ISSUE_NUMBER="${{ steps.context.outputs.NUMBER }}" \
-            -e USE_ROUTER="${{ steps.config.outputs.router_enabled }}" \
-            -e ROUTER_CONFIG="${{ steps.config.outputs.router_config }}" \
-            -e MODEL_OVERRIDE="${{ steps.config.outputs.model_override }}" \
-            sdlc-claude:latest
+      - name: Run Claude Code
+        if: steps.permission_check.outputs.has_permission == 'true'
+        id: claude
+        uses: anthropics/claude-code-action@beta
+        env:
+          ANTHROPIC_BASE_URL: ${{ steps.router_url.outputs.url }}
+        with:
+          anthropic_api_key: "any-string-is-ok"
+          prompt: ${{ steps.prompt.outputs.prompt }}

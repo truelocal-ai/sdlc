@@ -121,101 +121,6 @@ fi
 echo "Repository cloned to: $WORKSPACE_DIR"
 echo ""
 
-# Configure Claude Code Router if enabled
-USE_ROUTER="${USE_ROUTER:-false}"
-MODEL_OVERRIDE="${MODEL_OVERRIDE:-}"
-ROUTER_CONFIG_DIR="/home/claude/.claude-code-router"
-ROUTER_CONFIG_FILE="$ROUTER_CONFIG_DIR/config.json"
-CLAUDE_CMD="claude"
-
-if [ "$USE_ROUTER" = "true" ]; then
-    echo "=== Configuring Claude Code Router ==="
-    
-    # Create router config directory
-    mkdir -p "$ROUTER_CONFIG_DIR"
-    
-    # Write router configuration
-    # Decode base64-encoded ROUTER_CONFIG if provided, otherwise use ROUTER_CONFIG directly
-    if [ -n "$ROUTER_CONFIG_B64" ]; then
-        echo "Using provided router configuration from ROUTER_CONFIG_B64 (base64 encoded)"
-        ROUTER_CONFIG=$(echo "$ROUTER_CONFIG_B64" | base64 -d 2>/dev/null)
-        if [ $? -ne 0 ]; then
-            echo "ERROR: Failed to decode ROUTER_CONFIG_B64"
-            exit 1
-        fi
-    fi
-    
-    if [ -n "$ROUTER_CONFIG" ]; then
-        echo "Using provided router configuration from ROUTER_CONFIG environment variable"
-        
-        # Validate JSON before writing to file
-        if ! echo "$ROUTER_CONFIG" | jq empty > /dev/null 2>&1; then
-            echo "ERROR: ROUTER_CONFIG is not valid JSON"
-            echo "First 200 chars of config:"
-            echo "$ROUTER_CONFIG" | head -c 200
-            exit 1
-        fi
-        
-        # Automatically set NON_INTERACTIVE_MODE to true for GitHub Actions/CI environments
-        # This ensures proper behavior in automated environments
-        ROUTER_CONFIG=$(echo "$ROUTER_CONFIG" | jq '.NON_INTERACTIVE_MODE = true')
-        
-        echo "$ROUTER_CONFIG" > "$ROUTER_CONFIG_FILE"
-        
-        # Apply model override if specified
-        if [ -n "$MODEL_OVERRIDE" ]; then
-            echo "Applying model override: $MODEL_OVERRIDE"
-            # Update the Router.default field with the override
-            if ! jq --arg override "$MODEL_OVERRIDE" '.Router.default = $override' "$ROUTER_CONFIG_FILE" > "$ROUTER_CONFIG_FILE.tmp" 2>/dev/null; then
-                echo "ERROR: Failed to apply model override to router config"
-                echo "Config file content (first 200 chars):"
-                head -c 200 "$ROUTER_CONFIG_FILE"
-                exit 1
-            fi
-            mv "$ROUTER_CONFIG_FILE.tmp" "$ROUTER_CONFIG_FILE"
-            echo "✓ Router default model set to: $MODEL_OVERRIDE"
-        fi
-    else
-        echo "WARNING: USE_ROUTER is true but ROUTER_CONFIG is not set"
-        echo "Creating default router configuration. Please configure providers and models."
-        # Create a minimal default config with NON_INTERACTIVE_MODE enabled
-        jq -n '{
-            "NON_INTERACTIVE_MODE": true,
-            "Providers": [],
-            "Router": {
-                "default": "anthropic,claude-3.5-sonnet"
-            }
-        }' > "$ROUTER_CONFIG_FILE"
-    fi
-    
-    # Validate router config file
-    if [ ! -s "$ROUTER_CONFIG_FILE" ]; then
-        echo "ERROR: Failed to create router configuration file"
-        exit 1
-    fi
-    
-    # Validate JSON syntax
-    if ! jq empty "$ROUTER_CONFIG_FILE" 2>/dev/null; then
-        echo "ERROR: Invalid JSON in router configuration"
-        exit 1
-    fi
-    
-    # Use ccr (claude-code-router) command instead of claude
-    CLAUDE_CMD="ccr code"
-    
-    echo "Claude Code Router configuration complete"
-    echo "  - Config file: $ROUTER_CONFIG_FILE"
-    echo "  - Using command: $CLAUDE_CMD"
-    if [ -n "$MODEL_OVERRIDE" ]; then
-        echo "  - Model override: $MODEL_OVERRIDE"
-    fi
-    echo ""
-else
-    echo "=== Router Support Disabled ==="
-    echo "Using standard Claude Code CLI directly (Anthropic)."
-    echo ""
-fi
-
 # Prepare prompts
 echo "=== Preparing prompts ==="
 
@@ -264,70 +169,16 @@ echo "Working directory: $(pwd)"
 echo ""
 
 # Build claude command
-# Note: If router is enabled, CLAUDE_CMD is already set to "ccr code"
-# The router command doesn't support all flags, so we adjust accordingly
-if [ "$USE_ROUTER" = "true" ]; then
-    # ccr code doesn't support --dangerously-skip-permissions flag
-    # ccr accepts the prompt as a positional argument, not via stdin
-    # We'll prepend system prompt to user prompt instead
-    CLAUDE_ARGS=(ccr code --continue --print)
-    
-    # For ccr, prepend system prompt to user prompt since --system-prompt
-    # may not be supported or may cause shell syntax errors with special characters
-    if [ -n "$SYSTEM_PROMPT" ]; then
-        USER_PROMPT="$SYSTEM_PROMPT
+CLAUDE_ARGS=(claude --continue --print --dangerously-skip-permissions)
 
-$USER_PROMPT"
-    fi
-    
-    # Store the full prompt to pass as positional argument to ccr code
-    FULL_PROMPT="$USER_PROMPT"
-else
-    CLAUDE_ARGS=(claude --continue --print --dangerously-skip-permissions)
-    
-    # Add system prompt for standard claude
-    if [ -n "$SYSTEM_PROMPT" ]; then
-        CLAUDE_ARGS+=(--system-prompt "$SYSTEM_PROMPT")
-    fi
-fi
-
-# Verify ccr is available if using router
-if [ "$USE_ROUTER" = "true" ]; then
-    if ! command -v ccr > /dev/null 2>&1; then
-        echo "ERROR: ccr command not found in PATH"
-        echo "PATH: $PATH"
-        echo "npm root -g: $(npm root -g 2>/dev/null || echo 'npm not available')"
-        which ccr || echo "ccr not found"
-        exit 1
-    fi
-    echo "✓ ccr command found: $(which ccr)"
-    
-    # Test ccr command to see if it works
-    echo "Testing ccr command..."
-    if ccr --version > /dev/null 2>&1; then
-        echo "✓ ccr --version works"
-        ccr --version
-    else
-        echo "⚠️  ccr --version failed, but continuing..."
-    fi
+# Add system prompt for claude
+if [ -n "$SYSTEM_PROMPT" ]; then
+    CLAUDE_ARGS+=(--system-prompt "$SYSTEM_PROMPT")
 fi
 
 # Run Claude with user prompt via stdin, capture output
 set +e
-# Debug: show what command we're running
-echo "Executing command: ${CLAUDE_ARGS[*]}"
-echo "User prompt length: $(echo -n "$USER_PROMPT" | wc -c) characters"
-
-# For ccr, pass prompt as positional argument (ccr code doesn't read from stdin properly)
-# For standard claude, use stdin
-if [ "$USE_ROUTER" = "true" ]; then
-    # ccr code accepts the prompt as a positional argument
-    # Pass the full prompt (including system prompt if prepended) as the last argument
-    "${CLAUDE_ARGS[@]}" "$FULL_PROMPT" 2>&1 | tee "$CLAUDE_OUTPUT_FILE"
-else
-    # For standard claude, use printf for better character handling
-    printf '%s\n' "$USER_PROMPT" | "${CLAUDE_ARGS[@]}" 2>&1 | tee "$CLAUDE_OUTPUT_FILE"
-fi
+echo "$USER_PROMPT" | "${CLAUDE_ARGS[@]}" 2>&1 | tee "$CLAUDE_OUTPUT_FILE"
 CLAUDE_EXIT_CODE=${PIPESTATUS[0]}
 set -e
 
